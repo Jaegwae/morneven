@@ -1,0 +1,7 @@
+{
+  "name": "morneven",
+  "private": true,
+  "scripts": {
+    "verify": "node scripts/verify.mjs"
+  }
+}

@@ -1,0 +1,15 @@
+.env
+.env.*
+*.local
+.DS_Store
+node_modules/
+functions/node_modules/
+.playwright-mcp/
+.firebase/
+.codex/
+.omx/
+AGENTS.md
+.local-data/
+uploads/
+firebase-debug.log
+firebase-debug.*.log
