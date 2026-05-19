@@ -40,7 +40,7 @@ body {
   left: 50%;
   top: 50%;
   z-index: 1;
-  width: min(920px, calc(100vw - 72px));
+  width: min(800px, calc(100vw - 72px));
   transform: translate(-50%, -50%);
   pointer-events: none;
   text-align: center;
@@ -900,7 +900,7 @@ body {
 
   .brand-lockup {
     top: 46%;
-    width: min(320px, calc(100vw - 24px));
+    width: min(280px, calc(100vw - 24px));
   }
 
   .piece {
