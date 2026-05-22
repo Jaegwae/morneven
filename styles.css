@@ -904,6 +904,8 @@ body {
   }
 
   .piece {
+    left: calc(var(--mobile-x, var(--x)) * 1vw);
+    top: calc(var(--mobile-y, var(--y)) * 1vh);
     width: min(var(--w), 118px);
   }
 
@@ -1004,46 +1006,6 @@ body {
   .auth-overlay,
   .manager-overlay {
     display: none;
-  }
-
-  .piece:nth-of-type(1) {
-    --x: 4 !important;
-    --y: 9 !important;
-  }
-
-  .piece:nth-of-type(2) {
-    --x: 64 !important;
-    --y: 9 !important;
-  }
-
-  .piece:nth-of-type(3) {
-    --x: 64 !important;
-    --y: 57 !important;
-  }
-
-  .piece:nth-of-type(4) {
-    --x: 4 !important;
-    --y: 65 !important;
-  }
-
-  .piece:nth-of-type(5) {
-    --x: 38 !important;
-    --y: 24 !important;
-  }
-
-  .piece:nth-of-type(6) {
-    --x: 31 !important;
-    --y: 48 !important;
-  }
-
-  .piece:nth-of-type(7) {
-    --x: 58 !important;
-    --y: 73 !important;
-  }
-
-  .piece:nth-of-type(8) {
-    --x: 5 !important;
-    --y: 33 !important;
   }
 }
 

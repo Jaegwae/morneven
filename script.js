@@ -815,19 +815,24 @@ const deletePiece = async (id) => {
 
   closeWindowsForPiece(id);
 
-  if (remoteAvailable) {
-    await deleteRemoteImage(id);
-  } else if (piece.dataset.kind === "default") {
-    const deletedDefaults = getDeletedDefaults();
-    deletedDefaults.add(id);
-    saveDeletedDefaults(deletedDefaults);
-  } else {
-    await deleteStoredImage(id);
-  }
+  try {
+    if (remoteAvailable) {
+      await deleteRemoteImage(id);
+    } else if (piece.dataset.kind === "default") {
+      const deletedDefaults = getDeletedDefaults();
+      deletedDefaults.add(id);
+      saveDeletedDefaults(deletedDefaults);
+    } else {
+      await deleteStoredImage(id);
+    }
 
-  piece.remove();
-  managerStatus.textContent = "";
-  renderManager();
+    piece.remove();
+    managerStatus.textContent = "";
+  } catch {
+    managerStatus.textContent = "Image could not be deleted.";
+  } finally {
+    renderManager();
+  }
 };
 
 const prepareFiles = async (fileList) => {
@@ -880,6 +885,7 @@ const savePendingImages = async () => {
   const records = pendingRecords.slice(0, slots);
   managerSave.disabled = true;
   managerStatus.textContent = "Saving images.";
+  let savedCount = 0;
 
   try {
     const baseCount = currentPieceCount();
@@ -904,12 +910,16 @@ const savePendingImages = async () => {
         await putStoredImage(record);
         createPieceElement(record);
       }
+      savedCount += 1;
     }
 
-    pendingRecords = [];
-    managerStatus.textContent = records.length === 1 ? "Image added." : "Images added.";
+    pendingRecords = pendingRecords.slice(savedCount);
+    managerStatus.textContent =
+      savedCount === 1 ? "Image added." : "Images added.";
   } catch {
-    managerStatus.textContent = "Images could not be saved.";
+    pendingRecords = pendingRecords.slice(savedCount);
+    managerStatus.textContent =
+      savedCount > 0 ? "Some images were saved." : "Images could not be saved.";
   } finally {
     renderManager();
   }

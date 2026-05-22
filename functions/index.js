@@ -5,16 +5,24 @@ const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { onRequest } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
+const {
+  MAX_IMAGES,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+  createSessionToken,
+  isValidSessionToken,
+  normalizeImageRecord,
+  parseCookies,
+  parseDataURL,
+  timingSafeEqual,
+  toPublicImageRecord,
+} = require("./shared");
 
 initializeApp();
 
 const adminPassword = defineSecret("MORNEVEN_ADMIN_PASSWORD");
 const sessionSecret = defineSecret("MORNEVEN_SESSION_SECRET");
 
-const SESSION_COOKIE = "__session";
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-const MAX_IMAGES = 20;
-const MAX_DATA_URL_BYTES = 12 * 1024 * 1024;
 const STATE_REF = getFirestore().collection("siteState").doc("morneven");
 const IMAGES_REF = getFirestore().collection("images");
 
@@ -27,44 +35,10 @@ const sendJSON = (response, status, payload, headers = {}) => {
   response.status(status).send(JSON.stringify(payload));
 };
 
-const parseCookies = (header = "") =>
-  Object.fromEntries(
-    header
-      .split(";")
-      .map((item) => {
-        const [key, ...valueParts] = item.trim().split("=");
-        return [key, valueParts.join("=")];
-      })
-      .filter(([key, value]) => key && value)
-      .map(([key, value]) => [key, decodeURIComponent(value)]),
-  );
-
-const sign = (value) =>
-  crypto.createHmac("sha256", sessionSecret.value()).update(value).digest("base64url");
-
-const timingSafeEqual = (left, right) => {
-  const leftBuffer = Buffer.from(String(left));
-  const rightBuffer = Buffer.from(String(right));
-  return (
-    leftBuffer.length === rightBuffer.length &&
-    crypto.timingSafeEqual(leftBuffer, rightBuffer)
-  );
-};
-
-const createSessionToken = () => {
-  const expiresAt = String(Date.now() + SESSION_TTL_MS);
-  return `${expiresAt}.${sign(expiresAt)}`;
-};
-
 const isValidSession = (request) => {
   const cookies = parseCookies(request.headers.cookie);
   const token = cookies[SESSION_COOKIE];
-  if (!token) return false;
-
-  const [expiresAt, signature] = token.split(".");
-  if (!expiresAt || !signature || Number(expiresAt) < Date.now()) return false;
-
-  return timingSafeEqual(signature, sign(expiresAt));
+  return isValidSessionToken(token, sessionSecret.value());
 };
 
 const requireAdmin = (request, response) => {
@@ -72,56 +46,6 @@ const requireAdmin = (request, response) => {
 
   sendJSON(response, 401, { ok: false });
   return false;
-};
-
-const normalizeText = (value, fallback, maxLength) => {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return (text || fallback).slice(0, maxLength);
-};
-
-const normalizeId = (value) => {
-  const fallback = `custom-${Date.now()}-${crypto.randomUUID()}`;
-  const id = normalizeText(value, fallback, 120)
-    .replace(/[^A-Za-z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return id || fallback;
-};
-
-const normalizeImageRecord = (payload) => ({
-  alt: normalizeText(payload.alt || payload.title, "MOR.NEVEN IMAGE", 80),
-  detail: normalizeText(
-    payload.detail,
-    "Added to the MOR.NEVEN board.",
-    260,
-  ),
-  id: normalizeId(payload.id),
-  r: normalizeText(payload.r, "0deg", 12),
-  shape: payload.shape === "portrait" ? "portrait" : "wide",
-  title: normalizeText(payload.title, "MOR.NEVEN IMAGE", 48),
-  type: normalizeText(
-    payload.type,
-    "Ceramic work / Workshop archive",
-    90,
-  ),
-  w: normalizeText(payload.w, payload.shape === "portrait" ? "122px" : "176px", 12),
-  x: Number.isFinite(Number(payload.x)) ? Number(payload.x) : 50,
-  y: Number.isFinite(Number(payload.y)) ? Number(payload.y) : 50,
-});
-
-const parseDataURL = (src) => {
-  if (typeof src !== "string" || Buffer.byteLength(src) > MAX_DATA_URL_BYTES) {
-    throw new Error("Invalid image.");
-  }
-
-  const match = src.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
-  if (!match) throw new Error("Invalid image.");
-
-  const contentType = match[1] === "image/jpg" ? "image/jpeg" : match[1];
-  return {
-    buffer: Buffer.from(match[2], "base64"),
-    contentType,
-  };
 };
 
 const getState = async () => {
@@ -134,7 +58,7 @@ const getState = async () => {
     hiddenDefaults: stateSnapshot.exists
       ? stateSnapshot.data().hiddenDefaults || []
       : [],
-    images: imageSnapshot.docs.map((doc) => doc.data()),
+    images: imageSnapshot.docs.map((doc) => toPublicImageRecord(doc.data())),
     ok: true,
   };
 };
@@ -148,9 +72,17 @@ const createImage = async (request, response) => {
     return;
   }
 
-  const record = normalizeImageRecord(request.body || {});
-  const { buffer, contentType } = parseDataURL(request.body.src);
-  const extension = contentType.split("/")[1].replace("jpeg", "jpg");
+  const payload = request.body || {};
+  const record = normalizeImageRecord(payload);
+  let image;
+  try {
+    image = parseDataURL(payload.src);
+  } catch {
+    sendJSON(response, 400, { ok: false, error: "invalid-image" });
+    return;
+  }
+
+  const { buffer, contentType, extension } = image;
   const storagePath = `images/${record.id}.${extension}`;
   const token = crypto.randomUUID();
   const bucket = getStorage().bucket();
@@ -178,7 +110,7 @@ const createImage = async (request, response) => {
   };
 
   await IMAGES_REF.doc(record.id).set(storedRecord);
-  sendJSON(response, 200, { image: storedRecord, ok: true });
+  sendJSON(response, 200, { image: toPublicImageRecord(storedRecord), ok: true });
 };
 
 const deleteImage = async (request, response, id) => {
@@ -226,7 +158,7 @@ const route = async (request, response) => {
 
       sendJSON(response, 200, { ok: true }, {
         "Set-Cookie": `${SESSION_COOKIE}=${encodeURIComponent(
-          createSessionToken(),
+          createSessionToken(sessionSecret.value()),
         )}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
       });
       return;

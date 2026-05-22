@@ -2,16 +2,26 @@ const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const http = require("node:http");
 const path = require("node:path");
+const {
+  MAX_DATA_URL_BYTES,
+  MAX_IMAGES,
+  SESSION_COOKIE,
+  SESSION_TTL_MS,
+  createSessionToken,
+  isValidSessionToken,
+  normalizeImageRecord,
+  parseCookies,
+  parseDataURL,
+  timingSafeEqual,
+  toPublicImageRecord,
+} = require("./functions/shared");
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 4173);
 const ADMIN_PASSWORD = process.env.MORNEVEN_ADMIN_PASSWORD;
 const SESSION_SECRET =
   process.env.MORNEVEN_SESSION_SECRET || crypto.randomBytes(32).toString("hex");
-const SESSION_COOKIE = "__session";
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
-const MAX_IMAGES = 20;
-const MAX_BODY_BYTES = 14 * 1024 * 1024;
+const MAX_BODY_BYTES = MAX_DATA_URL_BYTES + 2 * 1024 * 1024;
 const DATA_DIR = path.join(ROOT, ".local-data");
 const UPLOAD_DIR = path.join(ROOT, "uploads");
 const DATA_FILE = path.join(DATA_DIR, "images.json");
@@ -39,44 +49,6 @@ const sendJSON = (response, status, payload, headers = {}) => {
     ...headers,
   });
   response.end(JSON.stringify(payload));
-};
-
-const parseCookies = (header = "") =>
-  Object.fromEntries(
-    header
-      .split(";")
-      .map((item) => {
-        const [key, ...valueParts] = item.trim().split("=");
-        return [key, valueParts.join("=")];
-      })
-      .filter(([key, value]) => key && value)
-      .map(([key, value]) => [key, decodeURIComponent(value)]),
-  );
-
-const sign = (value) =>
-  crypto.createHmac("sha256", SESSION_SECRET).update(value).digest("base64url");
-
-const timingSafeEqual = (left, right) => {
-  const leftBuffer = Buffer.from(String(left));
-  const rightBuffer = Buffer.from(String(right));
-  return (
-    leftBuffer.length === rightBuffer.length &&
-    crypto.timingSafeEqual(leftBuffer, rightBuffer)
-  );
-};
-
-const createSessionToken = () => {
-  const expiresAt = String(Date.now() + SESSION_TTL_MS);
-  return `${expiresAt}.${sign(expiresAt)}`;
-};
-
-const isValidSession = (token) => {
-  if (!token) return false;
-
-  const [expiresAt, signature] = token.split(".");
-  if (!expiresAt || !signature || Number(expiresAt) < Date.now()) return false;
-
-  return timingSafeEqual(signature, sign(expiresAt));
 };
 
 const readRequestBody = (request) =>
@@ -121,53 +93,10 @@ const writeData = async (data) => {
 
 const requireAdmin = (request, response) => {
   const cookies = parseCookies(request.headers.cookie);
-  if (isValidSession(cookies[SESSION_COOKIE])) return true;
+  if (isValidSessionToken(cookies[SESSION_COOKIE], SESSION_SECRET)) return true;
 
   sendJSON(response, 401, { ok: false });
   return false;
-};
-
-const normalizeText = (value, fallback, maxLength) => {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return (text || fallback).slice(0, maxLength);
-};
-
-const normalizeId = (value) => {
-  const fallback = `custom-${Date.now()}-${crypto.randomUUID()}`;
-  const id = normalizeText(value, fallback, 120)
-    .replace(/[^A-Za-z0-9_-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
-  return id || fallback;
-};
-
-const normalizeImageRecord = (payload) => ({
-  alt: normalizeText(payload.alt || payload.title, "MOR.NEVEN IMAGE", 80),
-  detail: normalizeText(payload.detail, "Added to the MOR.NEVEN board.", 260),
-  id: normalizeId(payload.id),
-  r: normalizeText(payload.r, "0deg", 12),
-  shape: payload.shape === "portrait" ? "portrait" : "wide",
-  title: normalizeText(payload.title, "MOR.NEVEN IMAGE", 48),
-  type: normalizeText(payload.type, "Ceramic work / Workshop archive", 90),
-  w: normalizeText(payload.w, payload.shape === "portrait" ? "122px" : "176px", 12),
-  x: Number.isFinite(Number(payload.x)) ? Number(payload.x) : 50,
-  y: Number.isFinite(Number(payload.y)) ? Number(payload.y) : 50,
-});
-
-const parseDataURL = (src) => {
-  if (typeof src !== "string" || Buffer.byteLength(src) > MAX_BODY_BYTES) {
-    throw new Error("Invalid image.");
-  }
-
-  const match = src.match(/^data:(image\/(?:jpeg|jpg|png|webp));base64,([A-Za-z0-9+/=]+)$/);
-  if (!match) throw new Error("Invalid image.");
-
-  const contentType = match[1] === "image/jpg" ? "image/jpeg" : match[1];
-  return {
-    buffer: Buffer.from(match[2], "base64"),
-    contentType,
-    extension: contentType.split("/")[1].replace("jpeg", "jpg"),
-  };
 };
 
 const createImage = async (request, response, payload) => {
@@ -195,7 +124,7 @@ const createImage = async (request, response, payload) => {
 
   data.images.push(storedRecord);
   await writeData(data);
-  sendJSON(response, 200, { image: storedRecord, ok: true });
+  sendJSON(response, 200, { image: toPublicImageRecord(storedRecord), ok: true });
 };
 
 const deleteImage = async (request, response, id) => {
@@ -211,6 +140,11 @@ const deleteImage = async (request, response, id) => {
   }
 
   const image = data.images.find((item) => item.id === id);
+  if (!image) {
+    sendJSON(response, 404, { ok: false });
+    return;
+  }
+
   data.images = data.images.filter((item) => item.id !== id);
   await writeData(data);
 
@@ -265,7 +199,9 @@ const serveStatic = async (request, response, pathname) => {
 const handleAPI = async (request, response, pathname) => {
   if (pathname === "/api/session" && request.method === "GET") {
     const cookies = parseCookies(request.headers.cookie);
-    sendJSON(response, 200, { ok: isValidSession(cookies[SESSION_COOKIE]) });
+    sendJSON(response, 200, {
+      ok: isValidSessionToken(cookies[SESSION_COOKIE], SESSION_SECRET),
+    });
     return true;
   }
 
@@ -280,7 +216,7 @@ const handleAPI = async (request, response, pathname) => {
 
       sendJSON(response, 200, { ok: true }, {
         "Set-Cookie": `${SESSION_COOKIE}=${encodeURIComponent(
-          createSessionToken(),
+          createSessionToken(SESSION_SECRET),
         )}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
       });
     } catch {
@@ -290,7 +226,12 @@ const handleAPI = async (request, response, pathname) => {
   }
 
   if (pathname === "/api/images" && request.method === "GET") {
-    sendJSON(response, 200, { ...(await readData()), ok: true });
+    const data = await readData();
+    sendJSON(response, 200, {
+      ...data,
+      images: data.images.map(toPublicImageRecord),
+      ok: true,
+    });
     return true;
   }
 
